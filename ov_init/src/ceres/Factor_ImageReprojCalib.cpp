@@ -40,7 +40,7 @@ Factor_ImageReprojCalib::Factor_ImageReprojCalib(const Eigen::Vector2d &uv_meas_
   mutable_parameter_block_sizes()->push_back(3); // p_FinG
   mutable_parameter_block_sizes()->push_back(4); // q_ItoC
   mutable_parameter_block_sizes()->push_back(3); // p_IinC
-  mutable_parameter_block_sizes()->push_back(8); // focal, center, distortion
+  mutable_parameter_block_sizes()->push_back(10); // focal, center, distortion, model-specific extras
 }
 
 bool Factor_ImageReprojCalib::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const {
@@ -145,8 +145,8 @@ bool Factor_ImageReprojCalib::Evaluate(double const *const *parameters, double *
 
     // Jacbian wrt camera intrinsic
     if (jacobians[5]) {
-      Eigen::Map<Eigen::Matrix<double, 2, 8, Eigen::RowMajor>> jacobian(jacobians[5]);
-      jacobian.block(0, 0, 2, 8) = H_dz_dzeta;
+      Eigen::Map<Eigen::Matrix<double, 2, 10, Eigen::RowMajor>> jacobian(jacobians[5]);
+      jacobian.block(0, 0, 2, 10) = H_dz_dzeta;
     }
   }
   return true;
