@@ -758,7 +758,7 @@ void ROS2Visualizer::publish_groundtruth() {
 
   // Publish our transform on TF
   geometry_msgs::msg::TransformStamped trans;
-  trans.header.stamp = ROSVisualizerHelper::get_time_from_seconds(timestamp);
+  trans.header.stamp = ROSVisualizerHelper::get_time_from_seconds(timestamp_inI);
   trans.header.frame_id = "map";
   trans.child_frame_id = "truth";
   trans.transform.rotation.x = state_gt(1, 0);
