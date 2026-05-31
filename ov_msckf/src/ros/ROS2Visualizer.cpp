@@ -840,12 +840,15 @@ void ROS2Visualizer::publish_loopclosure_information() {
   cv::Mat active_cam0_image;
   _app->get_active_tracks(active_tracks_time1, active_tracks_posinG, active_tracks_uvd);
   _app->get_active_image(active_tracks_time2, active_cam0_image);
-  if (active_tracks_time1 == -1)
+  if (active_tracks_time1 == -1) {
     return;
-  if (_app->get_state()->_clones_IMU.find(active_tracks_time1) == _app->get_state()->_clones_IMU.end())
+  }
+  if (_app->get_state()->_clones_IMU.find(active_tracks_time1) == _app->get_state()->_clones_IMU.end()) {
     return;
-  if (active_tracks_time1 != active_tracks_time2)
+  }
+  if (active_tracks_time1 != active_tracks_time2) {
     return;
+  }
 
   // Default header
   std_msgs::msg::Header header;

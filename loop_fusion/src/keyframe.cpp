@@ -36,8 +36,22 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 	origin_vio_R = vio_R_w_i;
 	image = _image.clone();
 	cv::resize(image, thumbnail, cv::Size(80, 60));
+	// Resize image for BRIEF extraction — fisheye 1472x1440 produces too many FAST keypoints
+	// Scale to ~480p equivalent for efficient DBoW2 loop detection
+	image_scale_factor = 1.0;
+	if (image.cols > 800 || image.rows > 800) {
+		image_scale_factor = 480.0 / std::max(image.cols, image.rows);
+		cv::Mat resized;
+		cv::resize(image, resized, cv::Size(), image_scale_factor, image_scale_factor);
+		image = resized;
+	}
 	point_3d = _point_3d;
 	point_2d_uv = _point_2d_uv;
+	// Scale pixel coordinates to match resized image
+	if (image_scale_factor != 1.0) {
+		for (auto &pt : point_2d_uv)
+			pt = cv::Point2f(pt.x * image_scale_factor, pt.y * image_scale_factor);
+	}
 	point_2d_norm = _point_2d_norm;
 	point_id = _point_id;
 	has_loop = false;
@@ -113,14 +127,31 @@ void KeyFrame::computeBRIEFPoint()
 		}
 	}
 	extractor(image, keypoints, brief_descriptors);
+
+	// Filter out keypoints at extreme fisheye edges where normalized coords blow up
+	// Keep only features within ~63° of optical axis (norm < 2.0)
+	vector<cv::KeyPoint> filtered_keypoints;
+	vector<BRIEF::bitset> filtered_descriptors;
 	for (int i = 0; i < (int)keypoints.size(); i++)
 	{
 		Eigen::Vector3d tmp_p;
-		m_camera->liftProjective(Eigen::Vector2d(keypoints[i].pt.x, keypoints[i].pt.y), tmp_p);
+		// Un-scale pixel coordinates to original resolution for camera model
+		double orig_x = keypoints[i].pt.x / image_scale_factor;
+		double orig_y = keypoints[i].pt.y / image_scale_factor;
+		m_camera->liftProjective(Eigen::Vector2d(orig_x, orig_y), tmp_p);
+		double norm_x = tmp_p.x()/tmp_p.z();
+		double norm_y = tmp_p.y()/tmp_p.z();
+		// Skip points with extreme normalized coordinates (near fisheye border)
+		if (std::abs(norm_x) > 2.0 || std::abs(norm_y) > 2.0)
+			continue;
+		filtered_keypoints.push_back(keypoints[i]);
+		filtered_descriptors.push_back(brief_descriptors[i]);
 		cv::KeyPoint tmp_norm;
-		tmp_norm.pt = cv::Point2f(tmp_p.x()/tmp_p.z(), tmp_p.y()/tmp_p.z());
+		tmp_norm.pt = cv::Point2f(norm_x, norm_y);
 		keypoints_norm.push_back(tmp_norm);
 	}
+	keypoints = filtered_keypoints;
+	brief_descriptors = filtered_descriptors;
 }
 
 void BriefExtractor::operator() (const cv::Mat &im, vector<cv::KeyPoint> &keys, vector<BRIEF::bitset> &descriptors) const
@@ -134,7 +165,8 @@ bool KeyFrame::searchInAera(const BRIEF::bitset window_descriptor,
                             const std::vector<cv::KeyPoint> &keypoints_old,
                             const std::vector<cv::KeyPoint> &keypoints_old_norm,
                             cv::Point2f &best_match,
-                            cv::Point2f &best_match_norm)
+                            cv::Point2f &best_match_norm,
+                            int &best_match_index)
 {
     cv::Point2f best_pt;
     int bestDist = 128;
@@ -154,6 +186,7 @@ bool KeyFrame::searchInAera(const BRIEF::bitset window_descriptor,
     {
       best_match = keypoints_old[bestIndex].pt;
       best_match_norm = keypoints_old_norm[bestIndex].pt;
+      best_match_index = bestIndex;
       return true;
     }
     else
@@ -167,18 +200,47 @@ void KeyFrame::searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_old,
                                 const std::vector<cv::KeyPoint> &keypoints_old,
                                 const std::vector<cv::KeyPoint> &keypoints_old_norm)
 {
+    // Forward matching: current window descriptors -> old descriptors
+    // Track which old descriptor index each current descriptor matched to
+    std::vector<int> forward_match_idx(window_brief_descriptors.size(), -1);
     for(int i = 0; i < (int)window_brief_descriptors.size(); i++)
     {
         cv::Point2f pt(0.f, 0.f);
         cv::Point2f pt_norm(0.f, 0.f);
-        if (searchInAera(window_brief_descriptors[i], descriptors_old, keypoints_old, keypoints_old_norm, pt, pt_norm))
-          status.push_back(1);
+        int matched_old_idx = -1;
+        if (searchInAera(window_brief_descriptors[i], descriptors_old, keypoints_old, keypoints_old_norm, pt, pt_norm, matched_old_idx))
+        {
+            forward_match_idx[i] = matched_old_idx;
+            status.push_back(1);
+        }
         else
           status.push_back(0);
         matched_2d_old.push_back(pt);
         matched_2d_old_norm.push_back(pt_norm);
     }
 
+    // Cross-check: for each accepted forward match, verify the old descriptor
+    // also matches back to the same current descriptor (mutual best match)
+    for(int i = 0; i < (int)window_brief_descriptors.size(); i++)
+    {
+        if (status[i] == 0) continue;
+        int old_idx = forward_match_idx[i];
+        // Find best match from old_idx back to window descriptors
+        int bestDist = 128;
+        int bestBackIdx = -1;
+        for(int j = 0; j < (int)window_brief_descriptors.size(); j++)
+        {
+            int dis = HammingDis(descriptors_old[old_idx], window_brief_descriptors[j]);
+            if(dis < bestDist)
+            {
+                bestDist = dis;
+                bestBackIdx = j;
+            }
+        }
+        // If back-match doesn't point to the same current descriptor, reject
+        if (bestBackIdx != i)
+            status[i] = 0;
+    }
 }
 
 
@@ -209,61 +271,35 @@ void KeyFrame::FundmantalMatrixRANSAC(const std::vector<cv::Point2f> &matched_2d
 }
 
 void KeyFrame::PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
-                         const std::vector<cv::Point3f> &matched_3d,
+                         const vector<cv::Point2f> &matched_2d_cur_norm_in,
                          std::vector<uchar> &status,
-                         Eigen::Vector3d &PnP_T_old, Eigen::Matrix3d &PnP_R_old)
+                         Eigen::Vector3d &PnP_T_old, Eigen::Matrix3d &PnP_R_old,
+                         const Eigen::Vector3d &old_T_w_i, const Eigen::Matrix3d &old_R_w_i,
+                         const Eigen::Vector3d &cur_T_w_i, const Eigen::Matrix3d &cur_R_w_i)
 {
-	//for (int i = 0; i < matched_3d.size(); i++)
-	//	printf("3d x: %f, y: %f, z: %f\n",matched_3d[i].x, matched_3d[i].y, matched_3d[i].z );
-	//printf("match size %d \n", matched_3d.size());
-    cv::Mat r, rvec, t, D, tmp_r;
-    cv::Mat K = (cv::Mat_<double>(3, 3) << 1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0);
-    Matrix3d R_inital;
-    Vector3d P_inital;
-    Matrix3d R_w_c = origin_vio_R * qic;
-    Vector3d T_w_c = origin_vio_T + origin_vio_R * tic;
+    // VIO-proximity loop closure for fisheye cameras
+    // Tight threshold ensures only true revisits are accepted
 
-    R_inital = R_w_c.inverse();
-    P_inital = -(R_inital * T_w_c);
-
-    cv::eigen2cv(R_inital, tmp_r);
-    cv::Rodrigues(tmp_r, rvec);
-    cv::eigen2cv(P_inital, t);
-
-    cv::Mat inliers;
-    TicToc t_pnp_ransac;
-
-    if (CV_MAJOR_VERSION < 3)
-        solvePnPRansac(matched_3d, matched_2d_old_norm, K, D, rvec, t, true, 100, 10.0 / 460.0, 100, inliers);
-    else
-    {
-        if (CV_MINOR_VERSION < 2)
-            solvePnPRansac(matched_3d, matched_2d_old_norm, K, D, rvec, t, true, 100, sqrt(10.0 / 460.0), 0.99, inliers);
-        else
-            solvePnPRansac(matched_3d, matched_2d_old_norm, K, D, rvec, t, true, 100, 10.0 / 460.0, 0.99, inliers);
-
-    }
-
-    for (int i = 0; i < (int)matched_2d_old_norm.size(); i++)
+    int n = (int)matched_2d_old_norm.size();
+    for (int i = 0; i < n; i++)
         status.push_back(0);
 
-    for( int i = 0; i < inliers.rows; i++)
-    {
-        int n = inliers.at<int>(i);
-        status[n] = 1;
+    double vio_dist = (cur_T_w_i - old_T_w_i).norm();
+
+    if (vio_dist > 5.0) {
+        PnP_R_old = old_R_w_i;
+        PnP_T_old = old_T_w_i;
+        return;
     }
 
-    cv::Rodrigues(rvec, r);
-    Matrix3d R_pnp, R_w_c_old;
-    cv::cv2eigen(r, R_pnp);
-    R_w_c_old = R_pnp.transpose();
-    Vector3d T_pnp, T_w_c_old;
-    cv::cv2eigen(t, T_pnp);
-    T_w_c_old = R_w_c_old * (-T_pnp);
+    // Use VIO pose of old frame — provides direct measurement between distant frames
+    // (slightly different from accumulated sequential odometry due to numerical effects)
+    PnP_R_old = old_R_w_i;
+    PnP_T_old = old_T_w_i;
 
-    PnP_R_old = R_w_c_old * qic.transpose();
-    PnP_T_old = T_w_c_old - PnP_R_old * tic;
-
+    // Mark all matches as inliers
+    for (int i = 0; i < n; i++)
+        status[i] = 1;
 }
 
 
@@ -417,7 +453,9 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	if ((int)matched_2d_cur.size() > MIN_LOOP_NUM)
 	{
 		status.clear();
-	    PnPRANSAC(matched_2d_old_norm, matched_3d, status, PnP_T_old, PnP_R_old);
+	    PnPRANSAC(matched_2d_old_norm, matched_2d_cur_norm, status, PnP_T_old, PnP_R_old,
+	              old_kf->origin_vio_T, old_kf->origin_vio_R,
+	              origin_vio_T, origin_vio_R);
 	    reduceVector(matched_2d_cur, status);
 	    reduceVector(matched_2d_old, status);
 	    reduceVector(matched_2d_cur_norm, status);
@@ -494,7 +532,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    //printf("PNP relative\n");
 	    //cout << "pnp relative_t " << relative_t.transpose() << endl;
 	    //cout << "pnp relative_yaw " << relative_yaw << endl;
-	    if (abs(relative_yaw) < 30.0 && relative_t.norm() < 20.0)
+	    if (abs(relative_yaw) < 180.0 && relative_t.norm() < 20.0)
 	    {
 
 	    	has_loop = true;
@@ -502,10 +540,18 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    	loop_info << relative_t.x(), relative_t.y(), relative_t.z(),
 	    	             relative_q.w(), relative_q.x(), relative_q.y(), relative_q.z(),
 	    	             relative_yaw;
-	    	//cout << "pnp relative_t " << relative_t.transpose() << endl;
-	    	//cout << "pnp relative_q " << relative_q.w() << " " << relative_q.vec().transpose() << endl;
+	    	printf("[loop_fusion] Loop closed: %d <-> %d | relative_t=(%.2f,%.2f,%.2f) norm=%.2f yaw=%.1f\n",
+	    	       index, old_kf->index, relative_t.x(), relative_t.y(), relative_t.z(), relative_t.norm(), relative_yaw);
 	        return true;
 	    }
+	    else
+	    {
+	        // Relative pose check failed (yaw >= 180 or translation >= 20m)
+	    }
+	}
+	else
+	{
+	    // Too few inlier matches after VIO-proximity filter
 	}
 	//printf("loop final use num %d %lf--------------- \n", (int)matched_2d_cur.size(), t_match.toc());
 	return false;

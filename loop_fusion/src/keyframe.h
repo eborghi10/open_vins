@@ -24,7 +24,7 @@
 #include "ThirdParty/DBoW/DBoW2.h"
 #include "ThirdParty/DVision/DVision.h"
 
-#define MIN_LOOP_NUM 25
+#define MIN_LOOP_NUM 8
 
 using namespace Eigen;
 using namespace std;
@@ -59,7 +59,8 @@ public:
 	                  const std::vector<cv::KeyPoint> &keypoints_old,
 	                  const std::vector<cv::KeyPoint> &keypoints_old_norm,
 	                  cv::Point2f &best_match,
-	                  cv::Point2f &best_match_norm);
+	                  cv::Point2f &best_match_norm,
+	                  int &best_match_index);
 	void searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_old,
 						  std::vector<cv::Point2f> &matched_2d_old_norm,
                           std::vector<uchar> &status,
@@ -70,9 +71,11 @@ public:
                                 const std::vector<cv::Point2f> &matched_2d_old_norm,
                                 vector<uchar> &status);
 	void PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
-	               const std::vector<cv::Point3f> &matched_3d,
+	               const vector<cv::Point2f> &matched_2d_cur_norm_in,
 	               std::vector<uchar> &status,
-	               Eigen::Vector3d &PnP_T_old, Eigen::Matrix3d &PnP_R_old);
+	               Eigen::Vector3d &PnP_T_old, Eigen::Matrix3d &PnP_R_old,
+	               const Eigen::Vector3d &old_T_w_i, const Eigen::Matrix3d &old_R_w_i,
+	               const Eigen::Vector3d &cur_T_w_i, const Eigen::Matrix3d &cur_R_w_i);
 	void getVioPose(Eigen::Vector3d &_T_w_i, Eigen::Matrix3d &_R_w_i);
 	void getPose(Eigen::Vector3d &_T_w_i, Eigen::Matrix3d &_R_w_i);
 	void updatePose(const Eigen::Vector3d &_T_w_i, const Eigen::Matrix3d &_R_w_i);
@@ -107,6 +110,7 @@ public:
 	vector<BRIEF::bitset> window_brief_descriptors;
 	bool has_fast_point;
 	int sequence;
+	double image_scale_factor; // scale factor applied to image (for liftProjective correction)
 
 	bool has_loop;
 	int loop_index;

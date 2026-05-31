@@ -100,7 +100,6 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     }
 	if (loop_index != -1)
 	{
-        //printf(" %d detect loop with %d \n", cur_kf->index, loop_index);
         KeyFrame* old_kf = getKeyFrame(loop_index);
 
         if (cur_kf->findConnection(old_kf))
@@ -153,9 +152,15 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
                 }
                 sequence_loop[cur_kf->sequence] = 1;
             }
+            printf("[loop_fusion] findConnection SUCCEEDED! Triggering optimization. shift_yaw=%.3f\n",
+                   use_imu ? Utility::R2ypr(w_R_cur).x() - Utility::R2ypr(vio_R_cur).x() : 0.0);
             m_optimize_buf.lock();
             optimize_buf.push(cur_kf->index);
             m_optimize_buf.unlock();
+        }
+        else
+        {
+            // findConnection failed for this candidate
         }
 	}
 	m_keyframelist.lock();
@@ -357,9 +362,13 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
     //first query; then add this frame into database!
     QueryResults ret;
     TicToc t_query;
-    db.query(keyframe->brief_descriptors, ret, 4, frame_index - 50);
-    //printf("query time: %f", t_query.toc());
-    //cout << "Searching for Image " << frame_index << ". " << ret << endl;
+    db.query(keyframe->brief_descriptors, ret, 4, frame_index - 20);
+    if (frame_index % 10 == 0 || ret.size() > 0) {
+        printf("[LOOP-DBG] detectLoop frame=%d desc_size=%zu query_max_id=%d ret_size=%zu",
+               frame_index, keyframe->brief_descriptors.size(), frame_index - 20, ret.size());
+        if (ret.size() > 0) printf(" best_score=%.4f best_id=%d", ret[0].Score, ret[0].Id);
+        printf("\n");
+    }
 
     TicToc t_add;
     db.add(keyframe->brief_descriptors);
@@ -411,7 +420,7 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
         cv::waitKey(20);
     }
 */
-    if (find_loop && frame_index > 50)
+    if (find_loop && frame_index > 20)
     {
         int min_index = -1;
         for (unsigned int i = 0; i < ret.size(); i++)
@@ -419,10 +428,16 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
             if (min_index == -1 || (ret[i].Id < min_index && ret[i].Score > 0.015))
                 min_index = ret[i].Id;
         }
+        printf("[LOOP-DBG] LOOP FOUND! frame=%d matched with %d\n", frame_index, min_index);
         return min_index;
     }
     else
+    {
+        if (frame_index > 50 && frame_index % 10 == 0)
+            printf("[LOOP-DBG] No loop at frame=%d (find_loop=%d, ret0_score=%.4f)\n",
+                   frame_index, find_loop, ret.size() > 0 ? ret[0].Score : 0.0);
         return -1;
+    }
 
 }
 

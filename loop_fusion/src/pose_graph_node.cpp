@@ -107,27 +107,14 @@ void new_sequence()
 
 void image_callback(const sensor_msgs::msg::Image::SharedPtr image_msg)
 {
-    //ROS_INFO("image_callback!");
     m_buf.lock();
     image_buf.push(image_msg);
     m_buf.unlock();
-    //printf(" image time %f \n", image_msg->header.stamp.sec);
-
-    // detect unstable camera stream
-    if (last_image_time == -1)
-        last_image_time = image_msg->header.stamp.sec + image_msg->header.stamp.nanosec * (1e-9);
-    else if (image_msg->header.stamp.sec + image_msg->header.stamp.nanosec * (1e-9) - last_image_time > 1.0 
-                    || image_msg->header.stamp.sec + image_msg->header.stamp.nanosec * (1e-9) < last_image_time)
-    {
-        ROS_WARN("image discontinue! detect a new sequence!");
-        new_sequence();
-    }
-    last_image_time = image_msg->header.stamp.sec + image_msg->header.stamp.nanosec * (1e-9);
+    // Sequence detection disabled: DDS delivery order is not guaranteed in ROS2
 }
 
 void point_callback(const sensor_msgs::msg::PointCloud::SharedPtr point_msg)
 {
-    //ROS_INFO("point_callback!");
     m_buf.lock();
     point_buf.push(point_msg);
     m_buf.unlock();
@@ -183,7 +170,6 @@ void margin_point_callback(const sensor_msgs::msg::PointCloud::SharedPtr point_m
 
 void pose_callback(const nav_msgs::msg::Odometry::SharedPtr pose_msg)
 {
-    //ROS_INFO("pose_callback!");
     m_buf.lock();
     pose_buf.push(pose_msg);
     m_buf.unlock();
