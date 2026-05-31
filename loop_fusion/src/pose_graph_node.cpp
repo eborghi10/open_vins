@@ -33,6 +33,7 @@
 #include "utility/tic_toc.h"
 #include "pose_graph.h"
 #include "utility/CameraPoseVisualization.h"
+#include "superpoint_onnx.h"
 // #include "camodocal/camera_models/CameraFactory.h"
 #include "parameters.h"
 #define SKIP_FIRST_CNT 10
@@ -73,8 +74,11 @@ rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_camera_po
 rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odometry_rect;
 
 std::string BRIEF_PATTERN_FILE;
+std::string SUPERPOINT_MODEL_PATH;
 std::string POSE_GRAPH_SAVE_PATH;
 std::string VINS_RESULT_PATH;
+int USE_SUPERPOINT = 0;
+std::shared_ptr<SuperPointONNX> g_superpoint;
 CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 Eigen::Vector3d last_t(-100, -100, -100);
 double last_image_time = -1;
@@ -446,6 +450,19 @@ int main(int argc, char **argv)
 
     BRIEF_PATTERN_FILE = pkg_path + "/../support_files/brief_pattern.yml";
     cout << "BRIEF_PATTERN_FILE" << BRIEF_PATTERN_FILE << endl;
+
+    SUPERPOINT_MODEL_PATH = pkg_path + "/../support_files/superpoint.onnx";
+    // Enable SuperPoint if model file exists
+    {
+        std::ifstream f(SUPERPOINT_MODEL_PATH);
+        USE_SUPERPOINT = f.good() ? 1 : 0;
+    }
+    if (USE_SUPERPOINT) {
+        printf("[loop_fusion] SuperPoint ONNX enabled: %s\n", SUPERPOINT_MODEL_PATH.c_str());
+        g_superpoint = std::make_shared<SuperPointONNX>(SUPERPOINT_MODEL_PATH, true, 1024, 480);
+    } else {
+        printf("[loop_fusion] SuperPoint ONNX not found, using BRIEF matching\n");
+    }
 
     int pn = config_file.find_last_of('/');
     std::string configPath = config_file.substr(0, pn);

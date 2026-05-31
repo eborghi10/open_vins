@@ -10,6 +10,10 @@
  *******************************************************/
 
 #include "keyframe.h"
+#include "superpoint_onnx.h"
+
+extern int USE_SUPERPOINT;
+extern std::shared_ptr<SuperPointONNX> g_superpoint;
 
 template <typename Derived>
 static void reduceVector(vector<Derived> &v, vector<uchar> status)
@@ -61,6 +65,7 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 	sequence = _sequence;
 	computeWindowBRIEFPoint();
 	computeBRIEFPoint();
+	computeSuperPointFeatures();
 	if(!DEBUG_IMAGE)
 		image.release();
 }
@@ -152,6 +157,129 @@ void KeyFrame::computeBRIEFPoint()
 	}
 	keypoints = filtered_keypoints;
 	brief_descriptors = filtered_descriptors;
+}
+
+void KeyFrame::computeSuperPointFeatures()
+{
+	if (!USE_SUPERPOINT || !g_superpoint)
+		return;
+
+	// Use the original full-resolution image (before BRIEF resizing)
+	// The image stored is already resized to ~480p, which is fine for SuperPoint
+	if (image.empty())
+		return;
+
+	SuperPointFeatures feats = g_superpoint->extract(image);
+	sp_keypoints = std::move(feats.keypoints);
+	sp_descriptors = std::move(feats.descriptors);
+
+	printf("[SuperPoint] Extracted %d keypoints from keyframe %d\n",
+	       (int)sp_keypoints.size(), index);
+}
+
+bool KeyFrame::findConnectionSuperPoint(KeyFrame* old_kf)
+{
+	if (sp_descriptors.empty() || old_kf->sp_descriptors.empty()) {
+		printf("[SuperPoint] Missing descriptors, falling back to BRIEF\n");
+		return findConnection(old_kf);
+	}
+
+	TicToc t_match;
+
+	// Match SuperPoint descriptors (mutual NN with ratio test)
+	std::vector<cv::DMatch> matches = SuperPointONNX::matchDescriptors(
+		sp_descriptors, old_kf->sp_descriptors, 0.9f);
+
+	printf("[SuperPoint] %d mutual matches between kf %d and kf %d (%.1fms)\n",
+	       (int)matches.size(), index, old_kf->index, t_match.toc());
+
+	if ((int)matches.size() < MIN_SUPERPOINT_INLIERS) {
+		return false;
+	}
+
+	// Collect matched 2D points
+	std::vector<cv::Point2f> pts_cur, pts_old;
+	pts_cur.reserve(matches.size());
+	pts_old.reserve(matches.size());
+	for (const auto& m : matches) {
+		pts_cur.push_back(sp_keypoints[m.queryIdx].pt);
+		pts_old.push_back(old_kf->sp_keypoints[m.trainIdx].pt);
+	}
+
+	// Geometric verification with Essential matrix
+	// Use camera model for normalization if available, else approximate for fisheye
+	std::vector<cv::Point2f> pts_cur_norm, pts_old_norm;
+	pts_cur_norm.reserve(pts_cur.size());
+	pts_old_norm.reserve(pts_old.size());
+
+	for (size_t i = 0; i < pts_cur.size(); i++) {
+		Eigen::Vector3d p3d;
+		m_camera->liftProjective(Eigen::Vector2d(pts_cur[i].x, pts_cur[i].y), p3d);
+		pts_cur_norm.emplace_back(p3d.x() / p3d.z(), p3d.y() / p3d.z());
+		m_camera->liftProjective(Eigen::Vector2d(pts_old[i].x, pts_old[i].y), p3d);
+		pts_old_norm.emplace_back(p3d.x() / p3d.z(), p3d.y() / p3d.z());
+	}
+
+	// Use a virtual pinhole camera for Essential matrix estimation
+	double FOCAL = 460.0;
+	double cx = COL / 2.0;
+	double cy = ROW / 2.0;
+
+	std::vector<cv::Point2f> pts_cur_px, pts_old_px;
+	for (size_t i = 0; i < pts_cur_norm.size(); i++) {
+		pts_cur_px.emplace_back(FOCAL * pts_cur_norm[i].x + cx,
+		                        FOCAL * pts_cur_norm[i].y + cy);
+		pts_old_px.emplace_back(FOCAL * pts_old_norm[i].x + cx,
+		                        FOCAL * pts_old_norm[i].y + cy);
+	}
+
+	cv::Mat K = (cv::Mat_<double>(3, 3) << FOCAL, 0, cx, 0, FOCAL, cy, 0, 0, 1);
+	cv::Mat mask;
+	cv::Mat E = cv::findEssentialMat(pts_cur_px, pts_old_px, K,
+	                                 cv::RANSAC, 0.999, 1.0, mask);
+
+	if (E.empty() || mask.empty()) {
+		printf("[SuperPoint] Essential matrix estimation failed\n");
+		return false;
+	}
+
+	int num_inliers = cv::countNonZero(mask);
+	printf("[SuperPoint] Essential matrix: %d/%d inliers\n", num_inliers, (int)matches.size());
+
+	if (num_inliers < MIN_SUPERPOINT_INLIERS) {
+		return false;
+	}
+
+	// With strong geometric verification (SuperPoint + Essential matrix),
+	// we can accept loop closures at larger VIO distances than BRIEF-based matching.
+	// Require high inlier ratio for distant loops as extra safety.
+	double vio_dist = (origin_vio_T - old_kf->origin_vio_T).norm();
+	double inlier_ratio = static_cast<double>(num_inliers) / matches.size();
+	double max_dist = (inlier_ratio > 0.4) ? 50.0 : 20.0;
+	if (vio_dist > max_dist) {
+		printf("[SuperPoint] Rejected: VIO distance %.1fm > %.0fm (inlier_ratio=%.2f)\n",
+		       vio_dist, max_dist, inlier_ratio);
+		return false;
+	}
+
+	// Use VIO relative pose as the loop constraint (more reliable than E decomposition for scale)
+	Eigen::Vector3d relative_t = old_kf->origin_vio_R.transpose() * (origin_vio_T - old_kf->origin_vio_T);
+	Eigen::Quaterniond relative_q(old_kf->origin_vio_R.transpose() * origin_vio_R);
+	double relative_yaw = Utility::normalizeAngle(
+		Utility::R2ypr(origin_vio_R).x() - Utility::R2ypr(old_kf->origin_vio_R).x());
+
+	if (abs(relative_yaw) < 180.0 && relative_t.norm() < 50.0) {
+		has_loop = true;
+		loop_index = old_kf->index;
+		loop_info << relative_t.x(), relative_t.y(), relative_t.z(),
+		             relative_q.w(), relative_q.x(), relative_q.y(), relative_q.z(),
+		             relative_yaw;
+		printf("[SuperPoint] Loop closed: %d <-> %d | inliers=%d dist=%.2f yaw=%.1f (%.1fms)\n",
+		       index, old_kf->index, num_inliers, relative_t.norm(), relative_yaw, t_match.toc());
+		return true;
+	}
+
+	return false;
 }
 
 void BriefExtractor::operator() (const cv::Mat &im, vector<cv::KeyPoint> &keys, vector<BRIEF::bitset> &descriptors) const

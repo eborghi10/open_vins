@@ -11,6 +11,8 @@
 
 #include "pose_graph.h"
 
+extern int USE_SUPERPOINT;
+
 PoseGraph::PoseGraph()
 {
     posegraph_visualization = new CameraPoseVisualization(1.0, 0.0, 1.0, 1.0);
@@ -102,7 +104,13 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
 	{
         KeyFrame* old_kf = getKeyFrame(loop_index);
 
-        if (cur_kf->findConnection(old_kf))
+        bool connection_found = false;
+        if (USE_SUPERPOINT)
+            connection_found = cur_kf->findConnectionSuperPoint(old_kf);
+        else
+            connection_found = cur_kf->findConnection(old_kf);
+
+        if (connection_found)
         {
             if (earliest_loop_index > loop_index || earliest_loop_index == -1)
                 earliest_loop_index = loop_index;

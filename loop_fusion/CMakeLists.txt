@@ -23,12 +23,25 @@ find_package(Eigen3)
 
 include_directories( ${CERES_INCLUDE_DIRS}  ${EIGEN3_INCLUDE_DIR}) #${catkin_INCLUDE_DIRS})
 
+# ONNX Runtime for SuperPoint inference
+set(ONNXRUNTIME_ROOT "/ros2_ws/onnxruntime-linux-x64-gpu-1.17.1")
+if(EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h")
+  set(ONNXRUNTIME_FOUND TRUE)
+  set(ONNXRUNTIME_INCLUDE_DIRS "${ONNXRUNTIME_ROOT}/include")
+  set(ONNXRUNTIME_LIBRARIES "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so")
+  include_directories(${ONNXRUNTIME_INCLUDE_DIRS})
+  message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_ROOT}")
+else()
+  set(ONNXRUNTIME_FOUND FALSE)
+  message(WARNING "ONNX Runtime not found at ${ONNXRUNTIME_ROOT}")
+endif()
 
 
 add_executable(loop_fusion_node
     src/pose_graph_node.cpp
     src/pose_graph.cpp
     src/keyframe.cpp
+    src/superpoint_onnx.cpp
     src/utility/CameraPoseVisualization.cpp
     src/ThirdParty/DBoW/BowVector.cpp
     src/ThirdParty/DBoW/FBrief.cpp
@@ -45,7 +58,10 @@ add_executable(loop_fusion_node
 # added from DEBUG
 ament_target_dependencies(loop_fusion_node camera_models rclcpp ament_index_cpp std_msgs sensor_msgs visualization_msgs nav_msgs cv_bridge OpenCV) # roslib) # does 'roslib' really need ??
 
-target_link_libraries(loop_fusion_node ${OpenCV_LIBS} ${CERES_LIBRARIES} ) #${catkin_LIBRARIES}  )
+target_link_libraries(loop_fusion_node ${OpenCV_LIBS} ${CERES_LIBRARIES} )
+if(ONNXRUNTIME_FOUND)
+  target_link_libraries(loop_fusion_node ${ONNXRUNTIME_LIBRARIES})
+endif()
 
 
 

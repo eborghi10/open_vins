@@ -25,6 +25,7 @@
 #include "ThirdParty/DVision/DVision.h"
 
 #define MIN_LOOP_NUM 8
+#define MIN_SUPERPOINT_INLIERS 20
 
 using namespace Eigen;
 using namespace std;
@@ -50,8 +51,10 @@ public:
 			 cv::Mat &_image, int _loop_index, Eigen::Matrix<double, 8, 1 > &_loop_info,
 			 vector<cv::KeyPoint> &_keypoints, vector<cv::KeyPoint> &_keypoints_norm, vector<BRIEF::bitset> &_brief_descriptors);
 	bool findConnection(KeyFrame* old_kf);
+	bool findConnectionSuperPoint(KeyFrame* old_kf);
 	void computeWindowBRIEFPoint();
 	void computeBRIEFPoint();
+	void computeSuperPointFeatures();
 	//void extractBrief();
 	int HammingDis(const BRIEF::bitset &a, const BRIEF::bitset &b);
 	bool searchInAera(const BRIEF::bitset window_descriptor,
@@ -111,6 +114,10 @@ public:
 	bool has_fast_point;
 	int sequence;
 	double image_scale_factor; // scale factor applied to image (for liftProjective correction)
+
+	// SuperPoint features (extracted via ONNX, stored for matching)
+	cv::Mat sp_descriptors;   // (N, 256) float32
+	std::vector<cv::KeyPoint> sp_keypoints;  // keypoints in original image coords
 
 	bool has_loop;
 	int loop_index;
